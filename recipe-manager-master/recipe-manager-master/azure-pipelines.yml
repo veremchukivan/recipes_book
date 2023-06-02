@@ -1,0 +1,184 @@
+# ASP.NET Core
+# Build and test ASP.NET Core projects targeting .NET Core.
+# Add steps that run tests, create a NuGet package, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
+
+trigger:
+- master
+
+variables:
+- group: GitHubPATGroup
+- name: buildConfiguration
+  value: 'Release'
+
+jobs:
+- job: WebAPI
+  pool:
+    vmImage: 'ubuntu-latest'
+  steps:
+
+  - task: UseDotNet@2
+    displayName: Use .NET Core 3.1 SDK
+    inputs:
+      packageType: 'sdk'
+      version: '3.1.201'
+    
+  # Important: if WebClient is built, the Azure deployment might fail (give 404 errors)
+  - task: DotNetCoreCLI@2
+    displayName: DotNet Build Backend
+    inputs:
+      command: build
+      arguments: '--configuration $(buildConfiguration)'
+      projects: |
+        src/ApplicationCore/*.csproj
+        src/Infrastructure/*.csproj
+        src/WebApi/*.csproj
+        tests/**/*.csproj
+
+  - task: DockerCompose@0
+    displayName: Start Development PostgreSQL Database
+    inputs:
+      containerregistrytype: 'Azure Container Registry'
+      dockerComposeFile: '**/docker-compose.yml'
+      action: 'Run a Docker Compose command'
+      dockerComposeCommand: 'up -d'
+      
+  - task: DotNetCoreCLI@2
+    displayName: Run Backend Unit Tests
+    inputs:
+      command: test
+      projects: 'tests/*UnitTests/*.csproj'
+      arguments: '--configuration $(buildConfiguration)'
+
+  - task: DotNetCoreCLI@2
+    displayName: Run Backend Integration Tests
+    inputs:
+      command: test
+      projects: 'tests/*IntegrationTests/*.csproj'
+      arguments: '--configuration $(buildConfiguration)'
+    
+  - task: DotNetCoreCLI@2
+    displayName: Run Backend Functional Tests
+    inputs:
+      command: test
+      projects: 'tests/*FunctionalTests/*.csproj'
+      arguments: '--configuration $(buildConfiguration)'
+
+  - task: DotNetCoreCLI@2
+    displayName: Dotnet Publish Backend
+    inputs:
+      command: publish
+      publishWebProjects: False
+      arguments: '--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+      zipAfterPublish: False
+      projects: 
+        src/WebApi/*.csproj
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish Backend Artifact
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/WebApi'
+      artifact: 'WebAPI'
+      publishLocation: 'pipeline'
+
+  - task: CopyFiles@2
+    displayName: Copy DockerCompose Files
+    inputs:
+      contents: '**/docker-compose*.yml'
+      targetFolder: '$(Build.ArtifactStagingDirectory)'
+      cleanTargetFolder: True
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish DockerCompose Artifact
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)'
+      artifact: 'DockerCompose'
+      publishLocation: 'pipeline'
+
+  # This just adds build time and is not being used at the moment
+  # - task: Docker@2
+  #   displayName: Build and Push Docker Image 
+  #   inputs:
+  #     containerRegistry: 'docker-hub'
+  #     repository: 'fernandr/recipemanager'
+  #     command: 'buildAndPush'
+  #     Dockerfile: 'src/WebApi/Dockerfile'
+  #     buildContext: '.'
+  #     tags: |
+  #       $(Build.BuildId)
+  #       latest
+
+  - task: CopyFilesOverSSH@0
+    displayName: Transfer Update Script
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    inputs:
+      sshEndpoint: 'rpi'
+      contents: 'update-service.sh'
+      targetFolder: '/home/pi/recipe-manager'
+      readyTimeout: '20000'
+
+  - task: SSH@0
+    displayName: Update Service
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    inputs:
+      sshEndpoint: 'rpi'
+      runOptions: 'inline'
+      inline: |
+        chmod +x /home/pi/recipe-manager/update-service.sh
+        /home/pi/recipe-manager/update-service.sh $(Build.BuildId) 2>&1
+      readyTimeout: '20000'
+
+- job: WebClient
+  pool:
+    # WebCompiler (for SASS files) only works on Windows for now
+    vmImage: 'windows-latest'
+  steps:
+  
+  - task: UseDotNet@2
+    displayName: Use .NET Core 3.1 SDK
+    inputs:
+      packageType: 'sdk'
+      version: '3.1.201'
+
+  - task: DotNetCoreCLI@2
+    displayName: DotNet Build Frontend
+    inputs:
+      command: build
+      arguments: '--configuration $(buildConfiguration)'
+      projects: |
+        src/WebClient/*.csproj
+
+  # TODO: Run frontend tests
+
+  - task: DotNetCoreCLI@2
+    displayName: Publish App
+    inputs:
+      command: publish
+      # Important: If you zip the publish, the GitHub Pages script will need to unzip it first
+      zipAfterPublish: false
+      arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+      projects: |
+        src/WebClient/*.csproj
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifacts'
+    inputs:
+      pathtoPublish: $(Build.ArtifactStagingDirectory)/WebClient
+      artifactName: 'WebClient'
+
+  - script: |
+      git config --global user.name "%NAME%"
+      git config --global user.email "%EMAIL%"
+      cd $(Build.ArtifactStagingDirectory)/WebClient/wwwroot
+      git init
+      git checkout -b gh-pages
+      echo * binary > .gitattributes
+      git add -A
+      git commit -m "Create build $(Build.BuildId)"
+      git push -f https://%PAT%@github.com/fernandreu/recipe-manager.git gh-pages
+    displayName: 'Publish to GitHub Pages'
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    env:
+      PAT: $(GitHubPAT)
+      NAME: $(GitHubName)
+      EMAIL: $(GitHubEmail)

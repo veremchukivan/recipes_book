@@ -1,0 +1,132 @@
+﻿@page "/recipes"
+@using System.Collections.Specialized
+@using System.Linq
+@using System.Net.Http.Json
+@using RecipeManager.ApplicationCore.Models
+@using RecipeManager.ApplicationCore.Resources
+@using RecipeManager.ApplicationCore.Search
+@inject HttpClient Http
+@inject ServerConfig ServerConfig
+@inject NavigationManager NavigationManager
+
+<h1>Recipes</h1>
+
+
+Search recipes by the ingredients they contain.
+
+<p>@StatusMessage</p>
+
+<MainSearch OnSearch="@LoadDataAsync" IsEnabled="@(!IsSearching)" />
+
+@if (Results != null)
+{
+    foreach (var recipe in Results.Value)
+    {
+        var available = recipe.Ingredients
+            .Select(x => IngredientTerms?.Any(y => y.IsMatch(x)) ?? false)
+            .ToList();
+        
+        <MatCard Class="mat-elevation-z3" Style="margin: 8px; padding: 8px;" Stroke="true">
+            <h1>@(recipe.Title + (available.All(x => x) ? " - Available" : string.Empty))</h1>
+            <MatTable Items="@recipe.Ingredients.Zip(available, (x, y) => (ingredient: x, isAvailable: y))" ShowPaging="false">
+                <MatTableHeader>
+                    <th>Name</th>
+                    <th>Quantity</th>
+                    <th>Units</th>
+                     @if (IngredientTerms != null)
+                     {
+                         <th>Available</th>
+                     }
+                </MatTableHeader>
+                <MatTableRow>
+                    <td>@context.ingredient.Name</td>
+                    <td>@context.ingredient.Quantity</td>
+                    <td>@context.ingredient.Units</td>
+                     @if (IngredientTerms != null)
+                     {
+                         <th>@(context.isAvailable ? "x" : string.Empty)</th>
+                     }
+                </MatTableRow>
+            </MatTable>
+        </MatCard>
+    }
+}
+
+@code
+{
+    [CascadingParameter]
+    private Task<AuthenticationState> AuthenticationStateTask { get; set; }
+    
+    bool IsSearching { get; set; }
+
+    PagedCollection<RecipeResource> Results { get; set; }
+
+    private ICollection<IngredientSearchTerm> IngredientTerms { get; set; }
+    
+    private string StatusMessage { get; set; } = "Status Message";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await base.OnInitializedAsync();
+        
+        await base.OnInitializedAsync();
+        var user = (await AuthenticationStateTask).User;
+        if (!user.Identity.IsAuthenticated)
+        {
+            return;
+        }
+        
+        var uri = ServerConfig.UrlTo("ingredients");
+        
+        try
+        {
+            var ingredients = await Http.GetJsonAsync<PagedCollection<IngredientResource>>(uri.ToString());
+            
+            IngredientTerms = new List<IngredientSearchTerm>();
+            foreach (var ingredient in ingredients.Value)
+            {
+                IngredientTerms.Add(new IngredientSearchTerm
+                {
+                    Name = ingredient.Name,
+                    Operator = SearchOperator.LessThan,
+                    Quantity = ingredient.Quantity,
+                    Units = ingredient.Units,
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.ToString();
+        }
+    }
+
+    private async Task LoadDataAsync(string searchText)
+    {
+        var queryParameters = new NameValueCollection();
+        if (!string.IsNullOrWhiteSpace(searchText))
+        {
+            queryParameters["search"] = $"ingredients co {searchText}";
+        }
+
+        var uri = ServerConfig.UrlTo("recipes", queryParameters);
+
+        StatusMessage = $"Uri: {uri}";
+        Results = null;
+        IsSearching = true;
+        StateHasChanged();
+        try
+        {
+            Results = await Http.GetFromJsonAsync<PagedCollection<RecipeResource>>(uri);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage += Environment.NewLine + ex;
+            IsSearching = false;
+            StateHasChanged();
+            return;
+        }
+
+        IsSearching = false;
+        StateHasChanged();
+    }
+}
